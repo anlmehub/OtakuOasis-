@@ -1,0 +1,261 @@
+package.json
+
+{
+  "name": "otakuoasis",
+  "version": "1.0.0",
+  "description": "OtakuOasis – Website + REST API (Node.js, Express, MongoDB, Deploy-ready)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:dev": "nodemon server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "helmet": "^7.1.0",
+    "morgan": "^1.10.0"
+  },
+  "optionalDependencies": {
+
+  server.js
+
+const express = require("express");
+const cors = require("cors");
+const helmet = require("helmet");
+const compression = require("compression");
+const morgan = require("morgan");
+const rateLimit = require("express-rate-limit");
+const os = require("os");
+require("dotenv").config();
+
+const PORT = process.env.PORT || 5000;
+const OWNER_TOKEN = process.env.OWNER_TOKEN || "";
+const DEMO_AUTO_DELETE_MINUTES = parseInt(process.env.DEMO_AUTO_DELETE_MINUTES || "0", 10);
+const REQUIRE_OWNER_FOR_WRITES = process.env.REQUIRE_OWNER_FOR_WRITES === "true";
+
+let mongoose = null;
+const hasMongo = !!process.env.MONGODB_URI;
+if (hasMongo) {
+  try {
+    mongoose = require("mongoose");
+  } catch (e) {
+    console.warn("Install mongoose with npm i mongoose");
+  }
+}
+
+const app = express();
+
+// Security & performance middleware
+app.use(helmet());
+app.use(compression());
+app.use(cors());
+app.use(express.json());
+app.use(morgan("tiny"));
+app.set("trust proxy", 1);
+
+// Basic rate limiting
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(limiter);
+
+/* -----------------------------
+   Anime Data Layer
+------------------------------*/
+let AnimeModel = null;
+let usingMemory = true;
+let memoryStore = { anime: [] };
+
+async function initData() {
+  if (hasMongo && mongoose) {
+    try {
+      await mongoose.connect(process.env.MONGODB_URI);
+      const schema = new mongoose.Schema({
+        title: { type: String, required: true },
+        description: String,
+        episodes: Number,
+        status: { type: String, enum: ["Ongoing", "Completed"], default: "Ongoing" },
+        streamUrl: String,
+        downloadUrl: String,
+        createdAt: { type: Date, default: Date.now },
+      });
+      AnimeModel = mongoose.model("Anime", schema);
+      usingMemory = false;
+
+      const count = await AnimeModel.countDocuments();
+      if (count === 0) {
+        const popular = [
+          { title: "Naruto", description: "A young ninja strives to be the best.", episodes: 220, status: "Completed", streamUrl: "#", downloadUrl: "#" },
+          { title: "One Piece", description: "Pirates, adventures, and the search for the One Piece.", episodes: 1100, status: "Ongoing", streamUrl: "#", downloadUrl: "#" },
+          { title: "Attack on Titan", description: "Humans fight titans.", episodes: 87, status: "Completed", streamUrl: "#", downloadUrl: "#" },
+          { title: "Demon Slayer", description: "A boy fights demons to save his sister.", episodes: 26, status: "Ongoing", streamUrl: "#", downloadUrl: "#" },
+          { title: "My Hero Academia", description: "Superheroes in training.", episodes: 112, status: "Ongoing", streamUrl: "#", downloadUrl: "#" }
+        ];
+        await AnimeModel.insertMany(popular);
+        console.log("✅ Preloaded popular anime.");
+      }
+      console.log("✅ MongoDB connected. Using Mongo storage.");
+    } catch (err) {
+      usingMemory = true;
+      console.warn("⚠️ Mongo connection failed, using in-memory demo store.");
+    }
+  } else {
+    usingMemory = true;
+    memoryStore.anime = [
+      { _id: "mem-1", title: "Naruto", description: "A young ninja strives to be the best.", episodes: 220, status: "Completed", streamUrl: "#", downloadUrl: "#", createdAt: new Date().toISOString() },
+      { _id: "mem-2", title: "One Piece", description: "Pirates, adventures, and the search for the One Piece.", episodes: 1100, status: "Ongoing", streamUrl: "#", downloadUrl: "#", createdAt: new Date().toISOString() },
+    ];
+    console.log("ℹ️ Using in-memory demo store.");
+  }
+
+  if (usingMemory && DEMO_AUTO_DELETE_MINUTES > 0) {
+    setInterval(() => {
+      memoryStore.anime = [];
+      console.log("🧹 In-memory demo auto-cleared.");
+    }, DEMO_AUTO_DELETE_MINUTES * 60 * 1000);
+  }
+}
+initData();
+
+/* -----------------------------
+   Helpers
+------------------------------*/
+function isOwner(req) {
+  const auth = (req.headers.authorization || "").replace("Bearer ", "");
+  if (OWNER_TOKEN && auth === OWNER_TOKEN) return true;
+  if (OWNER_TOKEN && req.query.owner === OWNER_TOKEN) return true;
+  const ip = req.ip || req.connection?.remoteAddress || "";
+  const isLocal = ip.includes("127.0.0.1") || ip.includes("::1") || req.hostname === "localhost";
+  return !OWNER_TOKEN && isLocal;
+}
+
+function healthSnapshot() {
+  const uptime = os.uptime();
+  const load = os.loadavg().map((n) => Number(n).toFixed(2));
+  const total = os.totalmem();
+  const free = os.freemem();
+  const used = total - free;
+  const mem = { totalGB: (total / 1024 / 1024 / 1024).toFixed(2), usedGB: (used / 1024 / 1024 / 1024).toFixed(2), usagePct: ((used / total) * 100).toFixed(2) + "%" };
+  return { uptime, load, mem, node: process.version };
+}
+
+/* -----------------------------
+   API Routes
+------------------------------*/
+// GET all anime with pagination
+app.get("/api/anime", async (req, res) => {
+  try {
+    const page = parseInt(req.query.page || "1", 10);
+    const limit = parseInt(req.query.limit || "20", 10);
+    const search = (req.query.search || "").toLowerCase();
+
+    let items = [];
+    if (usingMemory) {
+      items = memoryStore.anime;
+    } else {
+      items = await AnimeModel.find().sort({ createdAt: -1 });
+    }
+
+    if (search) {
+      items = items.filter(a =>
+        a.title.toLowerCase().includes(search) ||
+        (a.description || "").toLowerCase().includes(search)
+      );
+    }
+
+    const start = (page - 1) * limit;
+    const end = start + limit;
+    res.json({ page, limit, total: items.length, data: items.slice(start, end) });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch anime." });
+  }
+});
+
+// POST new anime
+app.post("/api/anime", async (req, res) => {
+  try {
+    if (REQUIRE_OWNER_FOR_WRITES && !isOwner(req)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    const { title, description = "", episodes = 0, status = "Ongoing", streamUrl = "#", downloadUrl = "#" } = req.body || {};
+    if (!title) return res.status(400).json({ error: "title is required" });
+
+    if (usingMemory) {
+      const item = { _id: "mem-" + Math.random().toString(36).slice(2), title, description, episodes: Number(episodes), status, streamUrl, downloadUrl, createdAt: new Date().toISOString() };
+      memoryStore.anime.unshift(item);
+      return res.json(item);
+    } else {
+      const created = await AnimeModel.create({ title, description, episodes, status, streamUrl, downloadUrl });
+      return res.json(created);
+    }
+  } catch (e) {
+    res.status(500).json({ error: "Failed to create anime." });
+  }
+});
+
+/* -----------------------------
+   Owner Endpoints
+------------------------------*/
+app.get("/owner/health.json", (req, res) => {
+  if (!isOwner(req)) return res.status(403).json({ error: "Forbidden" });
+  res.json(healthSnapshot());
+});
+
+app.delete("/owner/demo", (req, res) => {
+  if (!isOwner(req)) return res.status(403).json({ error: "Forbidden" });
+  if (usingMemory) { memoryStore.anime = []; return res.json({ ok: true, cleared: true, storage: "memory" }); }
+  return res.json({ ok: false, message: "Mongo demo purge not implemented." });
+});
+
+/* -----------------------------
+   Website
+------------------------------*/
+const HTML = `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1" /><title>OtakuOasis</title>
+<style>
+  body{margin:0;font-family:system-ui;background:#0b0b14;color:#f2f2f7;}header{padding:16px;display:flex;justify-content:space-between;}a{color:#f2f2f7;text-decoration:none;margin-left:10px;}main{max-width:960px;margin:20px auto;padding:0 16px;} .anime-item{border:1px solid rgba(255,255,255,0.1);padding:12px;margin-bottom:12px;border-radius:10px;}
+  .badge{padding:2px 6px;border-radius:8px;font-size:12px;margin-left:6px;}
+  .badge.ok{background:#10b981;color:#fff;}
+  .badge.warn{background:#f59e0b;color:#fff;}
+</style></head>
+<body>
+<header><div>OtakuOasis</div><nav><a href="#list">Anime List</a><a href="#add">Add Anime</a><a href="#owner">Owner</a></nav></header>
+<main>
+<section id="list"><h2>Anime List</h2><div id="animeList"></div></section>
+<section id="add"><h2>Add New Anime</h2><form id="form">
+<input name="title" placeholder="Title *" required/><input name="episodes" type="number" placeholder="Episodes"/><input name="status" placeholder="Status"/><input name="streamUrl" placeholder="Stream URL"/><input name="downloadUrl" placeholder="Download URL"/><textarea name="description" placeholder="Description"></textarea><button type="submit">Add Anime</button></form></section>
+<section id="owner"><h2>Owner Tools</h2><input id="ownerToken" placeholder="OWNER_TOKEN"/><button id="btnHealth">Health</button><button id="btnPurge">Purge Demo</button><pre id="health"></pre></section>
+</main>
+<script>
+async function loadAnime(){const res=await fetch('/api/anime');const json=await res.json();const data=json.data||json;const el=document.getElementById('animeList');el.innerHTML='';data.forEach(a=>{const div=document.createElement('div');div.className='anime-item';div.innerHTML='<strong>'+a.title+'</strong> <span class="badge '+(a.status==='Completed'?'ok':'warn')+'">'+a.status+'</span><br>'+a.description+'<br>Episodes: '+a.episodes+'<br><a href="'+a.streamUrl+'" target="_blank">Stream</a> | <a href="'+a.downloadUrl+'" target="_blank">Download</a>';el.appendChild(div);});}
+document.getElementById('form').addEventListener('submit',async e=>{e.preventDefault();const fd=new FormData(e.target);const body={title:fd.get('title'),episodes:Number(fd.get('episodes')||0),status:fd.get('status')||'Ongoing',description:fd.get('description')||'',streamUrl:fd.get('streamUrl')||'#',downloadUrl:fd.get('downloadUrl')||'#'};await fetch('/api/anime',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});e.target.reset();loadAnime();});document.getElementById('btnHealth').addEventListener('click',async()=>{const token=document.getElementById('ownerToken').value;const res=await fetch('/owner/health.json'+(token?'?owner='+encodeURIComponent(token):''),{headers:token?{Authorization:'Bearer '+token}:{}});document.getElementById('health').textContent=res.ok?JSON.stringify(await res.json(),null,2):'Forbidden'});document.getElementById('btnPurge').addEventListener('click',async()=>{const token=document.getElementById('ownerToken').value;await fetch('/owner/demo'+(token?'?owner='+encodeURIComponent(token):''),{method:'DELETE',headers:token?{Authorization:'Bearer '+token}:{}});loadAnime();alert('Demo purged');});document.addEventListener('DOMContentLoaded',loadAnime);
+</script>
+</body>
+</html>`;
+app.get("/", (req, res) => res.status(200).send(HTML));
+
+/* -----------------------------
+   Start Server
+------------------------------*/
+const server = app.listen(PORT, () => {
+  console.log(`🚀 OtakuOasis running on http://localhost:${PORT}`);
+  if (OWNER_TOKEN) console.log("🔒 Owner token set. Use header: Authorization: Bearer " + OWNER_TOKEN);
+  else console.log("ℹ️ No OWNER_TOKEN set. Owner actions allowed from localhost only.");
+});
+
+// Graceful shutdown
+process.on("SIGTERM", () => server.close(() => console.log("🔻 Server closed")));
+process.on("SIGINT", () => server.close(() => console.log("🔻 Server closed")));
+    "mongoose": "^8.6.0"
+  }
+}
