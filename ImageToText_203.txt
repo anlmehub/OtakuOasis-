@@ -1,0 +1,199 @@
+otakuoasis/
+-server/
+-app.ts
+models/
+Anime.ts
+User.ts
+Comment.ts
+routes/
+auth.ts anime.ts
+middleware/
+client/
+auth.ts
+public/
+- index.html
+src/
+App.tsx
+index.tsx
+pages/
+Home.tsx
+Browse.tsx
+AnimeDetail.tsx
+components/
+AuthForm.tsx
+- Anime Browser.tsx
+- AnimeComments.tsx
+import express from "express";
+import mongoose from "mongoose";
+import cors from "cors";
+import dotenv from "dotenv";
+import auth Routes from "./routes/auth"; import animeRoutes from "./routes/anime";
+dotenv.config();
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use("/api/auth", authRoutes); app.use("/api/anime", animeRoutes);
+mongoose.connect(process.env.MONGO_URI!, {dbName: "otakuoasis" })
+.then(() => {
+console.log("MongoDB connected");
+app.listen(4000, () => console.log("Server running
+on http://localhost:4000"));
+})
+.catch(err => console.error("MongoDB
+connection error:", err));
+import { Schema, model } from "mongoose";
+const SourceSchema = new Schema({
+type: { type: String, enum: ["subbed", "dubbed"],
+required: true },
+language: { type: String, required: true },
+streamUrl: { type: String, required: true },
+downloadUrl: { type: String, required: true },
+});
+const EpisodeSchema = new Schema({
+episodeNumber: Number,
+title: String,
+sources: [SourceSchema],
+lastUpdated: Date,
+});
+const AnimeSchema = new Schema({
+title: { type: String, required: true },
+description: String,
+genres: [String],
+releaseYear: Number,
+episodes: [EpisodeSchema],
+coverlmage: String,
+status: {type: String, enum: ["ongoing",
+"finished"], default: "ongoing" },
+lastUpdated: Date,
+});
+export default model("Anime", AnimeSchema);
+import { Schema, model } from "mongoose";
+const UserSchema = new Schema({
+username: { type: String, required: true, unique:
+true},
+email: { type: String, required: true, unique:
+true},
+passwordHash: { type: String, required: true },
+avatar: String,
+createdAt: { type: Date, default: Date.now },
+favorites: [{ type: Schema.Types.ObjectId, ref:
+"Anime" }],
+});
+export default model("User", UserSchema);
+import { Schema, model } from "mongoose";
+const CommentSchema = new Schema({ anime: { type: Schema.Types.ObjectId, ref:
+"Anime", required: true },
+user: { type: Schema.Types.ObjectId, ref: "User",
+required: true},
+text: {type: String, required: true },
+createdAt: { type: Date, default: Date.now },
+});
+export default model("Comment",
+CommentSchema);
+import { Request, Response, NextFunction } from
+"express";
+import jwt from "jsonwebtoken";
+export function authMiddleware(req: Request,
+res: Response, next: NextFunction) {
+const token =
+req.headers.authorization?.replace("Bearer ", ""); if (!token) return res.status(401).json({ error: "No
+token" });
+try {
+const payload = jwt.verify(token, process.env.JWT_SECRET!);
+(req as any).user = payload;
+next();
+} catch {
+return res.status(401).json({ error: "Invalid
+token" });
+}
+}
+import { Router } from "express";
+import User from "../models/User";
+import bcrypt from "bcryptis"; import jwt from "jsonwebtoken";
+const router = Router();
+router.post("/signup", async (req, res) => { const { username, email, password } = req.body; const passwordHash = await
+bcrypt.hash(password, 10);
+try {
+const user = await User.create({ username,
+email, passwordHash });
+const token = jwt.sign({ userld: user._id}, process.env.JWT_SECRET!, { expiresIn: "7d" });
+res.json({ token, user });
+} catch (err: any) {
+res.status(400).json({ error: err.message });
+}
+});
+router.post("/login", async (req, res) => { const { username, password } = req.body; const user = await User.findOne({ username });
+if (!user) return res.status(400).json({ error:
+"Invalid credentials" });
+const valid = await bcrypt.compare(password, user.passwordHash); if (!valid) return res.status(400).json({ error: "Invalid credentials" });
+const token = jwt.sign({ userld: user._id }, process.env.JWT_SECRET!, { expiresIn: "7d" }); res.json({ token, user });
+});
+export default router;
+import { Router } from "express";
+import Anime from "../models/Anime"; import Comment from "../models/Comment";
+import { authMiddleware } from "../middleware/
+auth";
+const router = Router();
+// List all anime or filter by genre
+router.get("/", async (req, res) => { const { genre } = req.query; const filter: any = genre ? { genres: genre } : {};
+const animeList = await Anime.find(filter); res.json(animeList);
+});
+// Get anime by ID router.get("/:id", async (req, res) => {
+const anime = await
+Anime.findByld(req.params.id); if (!anime) return res.status(404).json({ error:
+"Anime not found" });
+res.json(anime);
+});
+// Post a comment router.post("/:id/comment", authMiddleware,
+async (req, res) => {
+const { text } = req.body;
+const comment = await Comment.create({ anime: req.params.id,
+user: (req as any).user.userld,
+text,
+});
+});
+res.json(comment);
+// Get comments for anime router.get("/:id/comments", async (req, res) => { const comments = await Comment.find({ anime: req.params.id }).populate("user", "username avatar");
+res.json(comments);
+});
+export default router;
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import Home from "./pages/Home"; import Browse from "./pages/Browse"; import AnimeDetail from "./pages/AnimeDetail";
+import AuthForm from "./components/ AuthForm";
+function App() {
+return ( <BrowserRouter>
+<Routes>
+<Route path="/" element={<Home />} />
+<Route path="/browse" element={<Browse />} /> <Route path="/anime/:id"
+element={<AnimeDetail />} />
+<Route path="/login" element={<AuthForm mode="login" />} />
+<Route path="/signup" element={<AuthForm mode="signup" />} /> </Routes>
+</BrowserRouter>
+);
+}
+export default App;
+export default function Home() {
+return
+(
+<main className="min-h-screen
+bg-gradient-to-br from-indigo-900 via-purple-900
+to-pink-900 text-white">
+<header className="flex items-center justify-between px-8 py-6">
+<h1 className="text-4xl font-extrabold tracking-tight">OtakuOasis</h1> <nav className="space-x-4">
+<a href="/browse"
+className="hover:underline">Browse</a>
+<a href="/login"
+className="hover:underline">Login</a>
+</nav>
+</header>
+<section className="mt-12 text-center"> <h2 className="text-3xl font-bold mb-4">Stream and Download All Anime Dubbed and Subbed!</h2> <p className="mb-8">Your ultimate anime
+paradise awaits.</p> <a href="/browse" className="px-6 py-3 bg-pink-600 text-white rounded-lg text-lg font-bold hover:bg-pink-700 transition"> Browse Anime
+</a>
+</section>
+</main>
+);
+}
+import { useEffect, useState } from "react";
+import Anime Browser from "../components/ AnimeBrowser";
+export default function Browse() { const [animeList, setAnimeList
+From my TECNO
